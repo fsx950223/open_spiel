@@ -21,6 +21,7 @@ from typing import Sequence
 
 import numpy as np
 import tensorflow.compat.v1 as tf
+import horovod.tensorflow as hvd
 
 
 def cascade(x, fns):
@@ -159,6 +160,14 @@ class Model(object):
     self._train = self._session.graph.get_operation_by_name("train")
 
   @classmethod
+  def _get_gpu_config(cls):
+    config = tf.ConfigProto()
+    config.gpu_options.visible_device_list = str(hvd.local_rank())
+    config.gpu_options.allow_growth = True
+    config.gpu_options.force_gpu_compatible = True
+    return config
+
+  @classmethod
   def build_model(cls, model_type, input_shape, output_size, nn_width, nn_depth,
                   weight_decay, learning_rate, path):
     """Build a model with the specified params."""
@@ -174,12 +183,15 @@ class Model(object):
                         nn_depth, weight_decay, learning_rate)
       init = tf.variables_initializer(tf.global_variables(),
                                       name="init_all_vars_op")
+      bcast = hvd.broadcast_global_variables(0)
       with tf.device("/cpu:0"):  # Saver only works on CPU.
         saver = tf.train.Saver(
             max_to_keep=10000, sharded=False, name="saver")
-    session = tf.Session(graph=g)
+    config = cls._get_gpu_config()
+    session = tf.Session(graph=g, config=config)
     session.__enter__()
     session.run(init)
+    session.run(bcast)
     return cls(session, saver, path)
 
   @classmethod
@@ -199,7 +211,8 @@ class Model(object):
     g = tf.Graph()  # Allow multiple independent models and graphs.
     with g.as_default():
       saver = tf.train.import_meta_graph(metagraph)
-    session = tf.Session(graph=g)
+    config = cls._get_gpu_config()
+    session = tf.Session(graph=g, config=config)
     session.__enter__()
     session.run("init_all_vars_op")
     return cls(session, saver, path)
@@ -305,7 +318,8 @@ class Model(object):
     ], name="l2_reg_loss")
 
     total_loss = policy_loss + value_loss + l2_reg_loss
-    optimizer = tf.train.AdamOptimizer(learning_rate)
+    optimizer = tf.train.AdamOptimizer(learning_rate * hvd.size())
+    optimizer = hvd.DistributedOptimizer(optimizer)
     with tf.control_dependencies(bn_updates):
       unused_train = optimizer.minimize(total_loss, name="train")
 
@@ -347,10 +361,11 @@ class Model(object):
     return Losses(policy_loss, value_loss, l2_reg_loss)
 
   def save_checkpoint(self, step):
-    return self._saver.save(
-        self._session,
-        os.path.join(self._path, "checkpoint"),
-        global_step=step)
+    if hvd.rank() == 0:
+      return self._saver.save(
+          self._session,
+          os.path.join(self._path, "checkpoint"),
+          global_step=step)
 
   def load_checkpoint(self, path):
     return self._saver.restore(self._session, path)

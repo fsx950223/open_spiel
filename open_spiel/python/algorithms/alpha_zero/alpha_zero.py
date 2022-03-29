@@ -54,6 +54,7 @@ from open_spiel.python.utils import data_logger
 from open_spiel.python.utils import file_logger
 from open_spiel.python.utils import spawn
 from open_spiel.python.utils import stats
+import horovod.tensorflow as hvd
 
 # Time to wait for processes to join.
 JOIN_WAIT_DELAY = 0.001
@@ -497,6 +498,7 @@ def learner(*, game, config, actors, evaluators, broadcast_fn, logger):
 
 
 def alpha_zero(config: Config):
+  hvd.init()
   """Start all the worker processes for a full alphazero setup."""
   game = pyspiel.load_game(config.game)
   config = config._replace(
